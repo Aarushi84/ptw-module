@@ -5,11 +5,141 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+enum Role {
+  REQUESTER
+  AREA_OWNER
+  SAFETY_OFFICER
+  ADMIN
+}
+
+enum PermitType {
+  HOT_WORK
+  CONFINED_SPACE
+  WORKING_AT_HEIGHT
+  ELECTRICAL_LOTO
+}
+
+enum PermitStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  ACTIVE
+  SUSPENDED
+  CLOSED
+  CLOSED_VERIFIED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum Decision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  areaId       String?
+  area         Area?    @relation(fields: [areaId], references: [id])
+  permits      Permit[] @relation("Requester")
+  approvals    Approval[]
+  createdAt    DateTime @default(now())
+}
+
+model Plant {
+  id    String @id @default(cuid())
+  name  String
+  areas Area[]
+}
+
+model Area {
+  id        String      @id @default(cuid())
+  name      String
+  plantId   String
+  plant     Plant       @relation(fields: [plantId], references: [id])
+  equipment Equipment[]
+  users     User[]
+  permits   Permit[]
+}
+
+model Equipment {
+  id      String   @id @default(cuid())
+  tag     String   @unique
+  name    String
+  areaId  String
+  area    Area     @relation(fields: [areaId], references: [id])
+  permits Permit[]
+}
+
+model Permit {
+  id              String       @id @default(cuid())
+  number          String       @unique
+  type            PermitType
+  status          PermitStatus @default(DRAFT)
+  requesterId     String
+  requester       User         @relation("Requester", fields: [requesterId], references: [id])
+  contractorName  String
+  workDescription String
+  areaId          String
+  area            Area         @relation(fields: [areaId], references: [id])
+  equipmentId     String
+  equipment       Equipment    @relation(fields: [equipmentId], references: [id])
+  plannedStart    DateTime
+  plannedEnd      DateTime
+  hazards         String[]
+  ppeRequired     String[]
+  precautions     Json         @default("[]")
+  typeData        Json         @default("{}")
+  completionNotes String?
+  version         Int          @default(0)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  approvals       Approval[]
+  auditLogs       AuditLog[]
+
+  @@index([status])
+  @@index([type])
+  @@index([areaId])
+}
+
+model Approval {
+  id           String    @id @default(cuid())
+  permitId     String
+  permit       Permit    @relation(fields: [permitId], references: [id])
+  requiredRole Role
+  approverId   String?
+  approver     User?     @relation(fields: [approverId], references: [id])
+  decision     Decision  @default(PENDING)
+  comment      String?
+  decidedAt    DateTime?
+}
+
+model AuditLog {
+  id         String        @id @default(cuid())
+  permitId   String
+  permit     Permit        @relation(fields: [permitId], references: [id])
+  actorId    String
+  action     String
+  fromStatus PermitStatus?
+  toStatus   PermitStatus?
+  field      String?
+  oldValue   Json?
+  newValue   Json?
+  comment    String?
+  createdAt  DateTime      @default(now())
+
+  @@index([permitId])
 }
