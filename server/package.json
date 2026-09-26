@@ -25,6 +25,9 @@
     "prisma": "^6.19.3",
     "zod": "^4.6.5"
   },
+  "prisma": {
+  "seed": "tsx prisma/seed.ts"
+},
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
