@@ -56,6 +56,7 @@ model User {
   area         Area?    @relation(fields: [areaId], references: [id])
   permits      Permit[] @relation("Requester")
   approvals    Approval[]
+  auditLogs    AuditLog[]
   createdAt    DateTime @default(now())
 }
 
@@ -132,6 +133,7 @@ model AuditLog {
   permitId   String
   permit     Permit        @relation(fields: [permitId], references: [id])
   actorId    String
+  actor      User          @relation(fields: [actorId], references: [id])
   action     String
   fromStatus PermitStatus?
   toStatus   PermitStatus?
