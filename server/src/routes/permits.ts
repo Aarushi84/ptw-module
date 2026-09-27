@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, type PermitType } from "@prisma/client";
 import { prisma } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/requireRole";
@@ -9,6 +9,14 @@ import { RuleError } from "../services/permitRules";
 
 export const permitRouter = Router();
 permitRouter.use(requireAuth);
+
+// Permit types that are dangerous to run at the same time, in the same area —
+// e.g. hot work (open flame) and confined space entry (may need ventilation,
+// escape routes clear) should not overlap. Almost no PTW software checks this.
+const CONFLICTING_TYPES: Partial<Record<PermitType, PermitType[]>> = {
+  HOT_WORK: ["CONFINED_SPACE"],
+  CONFINED_SPACE: ["HOT_WORK"],
+};
 
 function handleError(err: unknown, res: any) {
   if (err instanceof ValidationError) {
@@ -55,6 +63,24 @@ permitRouter.post("/", requireRole(["REQUESTER", "ADMIN"]), async (req, res) => 
       return res.status(400).json({ message: "ppeRequired must be an array of strings" });
     }
 
+    // Conflict check — warn only, does not block creation
+    let conflictWarning: string | null = null;
+    const conflictTypes = CONFLICTING_TYPES[b.type as PermitType];
+    if (conflictTypes) {
+      const overlapping = await prisma.permit.findFirst({
+        where: {
+          areaId: b.areaId,
+          type: { in: conflictTypes },
+          status: { in: ["PENDING_APPROVAL", "APPROVED", "ACTIVE"] },
+          plannedStart: { lt: new Date(b.plannedEnd) },
+          plannedEnd: { gt: new Date(b.plannedStart) },
+        },
+      });
+      if (overlapping) {
+        conflictWarning = `Overlaps with ${overlapping.number} (${overlapping.type.replace("_", " ")}) in the same area during this time window.`;
+      }
+    }
+
     const permit = await prisma.permit.create({
       data: {
         number: await nextPermitNumber(),
@@ -77,7 +103,7 @@ permitRouter.post("/", requireRole(["REQUESTER", "ADMIN"]), async (req, res) => 
       data: { permitId: permit.id, actorId: req.user!.id, action: "CREATE", toStatus: "DRAFT" },
     });
 
-    res.status(201).json(permit);
+    res.status(201).json({ ...permit, conflictWarning });
   } catch (err) {
     handleError(err, res);
   }
