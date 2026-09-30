@@ -1,9 +1,10 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type PermitStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
 const PASSWORD = "password123";
+const HOUR = 60 * 60 * 1000;
 
 async function main() {
   console.log("Clearing existing data...");
@@ -36,11 +37,11 @@ async function main() {
   const safetyOfficer = await prisma.user.create({
     data: { name: "Suresh Iyer", email: "safety@ptw.test", passwordHash: hash, role: "SAFETY_OFFICER" },
   });
-  const admin = await prisma.user.create({
+  await prisma.user.create({
     data: { name: "Admin User", email: "admin@ptw.test", passwordHash: hash, role: "ADMIN" },
   });
 
-  // Equipment (~6, spread across areas)
+  // Equipment (6, spread across areas)
   const eq1 = await prisma.equipment.create({ data: { tag: "BLR-101", name: "Boiler Feed Pump", areaId: areaBoiler.id } });
   const eq2 = await prisma.equipment.create({ data: { tag: "BLR-102", name: "Boiler Pipe Rack", areaId: areaBoiler.id } });
   const eq3 = await prisma.equipment.create({ data: { tag: "TNK-201", name: "Diesel Storage Tank", areaId: areaTankFarm.id } });
@@ -48,11 +49,18 @@ async function main() {
   const eq5 = await prisma.equipment.create({ data: { tag: "WS-301", name: "Workshop Crane", areaId: areaWorkshop.id } });
   const eq6 = await prisma.equipment.create({ data: { tag: "WS-302", name: "Workshop Electrical Panel", areaId: areaWorkshop.id } });
 
+  // All dates are relative to the moment the seed runs.
+  // If permits look expired, run the seed again.
   const now = new Date();
-  const hoursFromNow = (h: number) => new Date(now.getTime() + h * 60 * 60 * 1000);
+  const hoursFromNow = (h: number) => new Date(now.getTime() + h * HOUR);
 
-  // Helper to create the two required Approval rows for permits past DRAFT
-  async function withApprovals(permitId: string, decisions: { role: "AREA_OWNER" | "SAFETY_OFFICER"; decision: "PENDING" | "APPROVED" | "REJECTED"; approverId?: string }[]) {
+  type Decision = "PENDING" | "APPROVED" | "REJECTED";
+
+  // Creates the two required Approval rows for permits past DRAFT
+  async function withApprovals(
+    permitId: string,
+    decisions: { role: "AREA_OWNER" | "SAFETY_OFFICER"; decision: Decision; approverId?: string; comment?: string }[]
+  ) {
     for (const d of decisions) {
       await prisma.approval.create({
         data: {
@@ -60,14 +68,50 @@ async function main() {
           requiredRole: d.role,
           decision: d.decision,
           approverId: d.approverId ?? null,
+          comment: d.comment ?? null,
           decidedAt: d.decision === "PENDING" ? null : new Date(),
         },
       });
     }
   }
 
+  // One audit log entry, dated "hoursAgo" hours before now
+  async function audit(
+    permitId: string,
+    actorId: string,
+    action: string,
+    from: PermitStatus | null,
+    to: PermitStatus | null,
+    hoursAgo: number,
+    comment?: string
+  ) {
+    await prisma.auditLog.create({
+      data: {
+        permitId,
+        actorId,
+        action,
+        fromStatus: from,
+        toStatus: to,
+        comment: comment ?? null,
+        createdAt: hoursFromNow(-hoursAgo),
+      },
+    });
+  }
+
+  // History helpers, so every seeded permit has a readable timeline
+  const created = (id: string, h: number) => audit(id, requester.id, "CREATE", null, "DRAFT", h);
+  async function submitted(id: string, h: number) {
+    await created(id, h);
+    await audit(id, requester.id, "SUBMIT", "DRAFT", "PENDING_APPROVAL", h - 1);
+  }
+  async function fullyApproved(id: string, h: number) {
+    await submitted(id, h);
+    await audit(id, areaOwner.id, "APPROVE", "PENDING_APPROVAL", "PENDING_APPROVAL", h - 2, "Area checked, isolation confirmed");
+    await audit(id, safetyOfficer.id, "APPROVE", "PENDING_APPROVAL", "APPROVED", h - 3, "Precautions verified on site");
+  }
+
   // 1. DRAFT — Hot Work
-  await prisma.permit.create({
+  const p1 = await prisma.permit.create({
     data: {
       number: "PTW-0001", type: "HOT_WORK", status: "DRAFT",
       requesterId: requester.id, contractorName: "ABC Welders",
@@ -78,9 +122,10 @@ async function main() {
       typeData: { hotWorkType: "welding", fireWatchName: "", extinguisherType: "CO2", combustiblesRadius: 10 },
     },
   });
+  await created(p1.id, 5);
 
   // 2. DRAFT — Confined Space
-  await prisma.permit.create({
+  const p2 = await prisma.permit.create({
     data: {
       number: "PTW-0002", type: "CONFINED_SPACE", status: "DRAFT",
       requesterId: requester.id, contractorName: "XYZ Contractors",
@@ -91,8 +136,10 @@ async function main() {
       typeData: { spaceId: "TNK-201-INT", entryPoint: "Top manhole", standbyAttendant: "", rescuePlan: "", ventilationMethod: "Forced air" },
     },
   });
+  await created(p2.id, 4);
 
-  // 3 & 4. PENDING_APPROVAL — one Working at Height, one Electrical LOTO, both with pending Approval rows
+  // 3. PENDING_APPROVAL — Working at Height in WORKSHOP.
+  // Area owner (Boiler House) is blocked here: use it to demo the wrong-area rule.
   const p3 = await prisma.permit.create({
     data: {
       number: "PTW-0003", type: "WORKING_AT_HEIGHT", status: "PENDING_APPROVAL",
@@ -108,40 +155,46 @@ async function main() {
     { role: "AREA_OWNER", decision: "PENDING" },
     { role: "SAFETY_OFFICER", decision: "PENDING" },
   ]);
+  await submitted(p3.id, 10);
 
+  // 4. PENDING_APPROVAL — Electrical LOTO in BOILER HOUSE.
+  // Area owner (Boiler House) can approve this one.
   const p4 = await prisma.permit.create({
     data: {
       number: "PTW-0004", type: "ELECTRICAL_LOTO", status: "PENDING_APPROVAL",
       requesterId: requester.id, contractorName: "PowerSafe Electricians",
-      workDescription: "Replace breaker in panel", areaId: areaWorkshop.id, equipmentId: eq6.id,
+      workDescription: "Isolate and replace breaker for feed pump motor", areaId: areaBoiler.id, equipmentId: eq1.id,
       plannedStart: hoursFromNow(6), plannedEnd: hoursFromNow(10),
       hazards: ["Electric shock"], ppeRequired: ["Insulated gloves", "Arc flash suit"],
       precautions: [{ text: "Test dead before touching", done: false }],
-      typeData: { equipmentTag: "WS-302", voltageLevel: "415V", isolationPoints: ["MCB-12"], lockNumbers: ["LK-045"], tagNumbers: ["TG-045"], earthingApplied: true, testedDeadBy: "" },
+      typeData: { equipmentTag: "BLR-101", voltageLevel: "415V", isolationPoints: ["MCB-12"], lockNumbers: ["LK-045"], tagNumbers: ["TG-045"], earthingApplied: true, testedDeadBy: "" },
     },
   });
   await withApprovals(p4.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
+    { role: "AREA_OWNER", decision: "PENDING" },
     { role: "SAFETY_OFFICER", decision: "PENDING" },
   ]);
+  await submitted(p4.id, 8);
 
-  // 5 & 6. APPROVED — fully approved, ready to activate
+  // 5. APPROVED — Hot Work, start time already passed, so it CAN be activated now
   const p5 = await prisma.permit.create({
     data: {
       number: "PTW-0005", type: "HOT_WORK", status: "APPROVED",
       requesterId: requester.id, contractorName: "ABC Welders",
       workDescription: "Cut damaged pipe section", areaId: areaBoiler.id, equipmentId: eq1.id,
-      plannedStart: hoursFromNow(1), plannedEnd: hoursFromNow(5),
+      plannedStart: hoursFromNow(-0.5), plannedEnd: hoursFromNow(5),
       hazards: ["Fire", "Sparks"], ppeRequired: ["Face shield", "Gloves"],
       precautions: [{ text: "Fire watch present", done: true }],
       typeData: { hotWorkType: "cutting", fireWatchName: "Ganesh", extinguisherType: "DCP", combustiblesRadius: 10, gasTest: { lel: 0, o2: 20.9, testedAt: now.toISOString() } },
     },
   });
   await withApprovals(p5.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
-    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id },
+    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id, comment: "Area checked, isolation confirmed" },
+    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id, comment: "Precautions verified on site" },
   ]);
+  await fullyApproved(p5.id, 30);
 
+  // 6. APPROVED — Confined Space, starts in 2 hours, so activating it now must be REFUSED
   const p6 = await prisma.permit.create({
     data: {
       number: "PTW-0006", type: "CONFINED_SPACE", status: "APPROVED",
@@ -154,11 +207,12 @@ async function main() {
     },
   });
   await withApprovals(p6.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
-    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id },
+    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id, comment: "Area checked, isolation confirmed" },
+    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id, comment: "Precautions verified on site" },
   ]);
+  await fullyApproved(p6.id, 26);
 
-  // 7 & 8. ACTIVE — currently in progress, one expiring soon (within 2 hrs) to test the dashboard highlight
+  // 7. ACTIVE — expires in 1.5 hours (shows in "expiring within 2 hours" on the dashboard)
   const p7 = await prisma.permit.create({
     data: {
       number: "PTW-0007", type: "WORKING_AT_HEIGHT", status: "ACTIVE",
@@ -171,10 +225,13 @@ async function main() {
     },
   });
   await withApprovals(p7.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
-    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id },
+    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id, comment: "Area checked, isolation confirmed" },
+    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id, comment: "Precautions verified on site" },
   ]);
+  await fullyApproved(p7.id, 28);
+  await audit(p7.id, requester.id, "ACTIVATE", "APPROVED", "ACTIVE", 2);
 
+  // 8. ACTIVE — long window, good one to suspend in the demo
   const p8 = await prisma.permit.create({
     data: {
       number: "PTW-0008", type: "ELECTRICAL_LOTO", status: "ACTIVE",
@@ -187,11 +244,13 @@ async function main() {
     },
   });
   await withApprovals(p8.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
-    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id },
+    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id, comment: "Area checked, isolation confirmed" },
+    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id, comment: "Precautions verified on site" },
   ]);
+  await fullyApproved(p8.id, 27);
+  await audit(p8.id, requester.id, "ACTIVATE", "APPROVED", "ACTIVE", 1);
 
-  // 9. CLOSED — awaiting safety officer verification
+  // 9. CLOSED — work done, waiting for the safety officer to verify
   const p9 = await prisma.permit.create({
     data: {
       number: "PTW-0009", type: "HOT_WORK", status: "CLOSED",
@@ -205,11 +264,14 @@ async function main() {
     },
   });
   await withApprovals(p9.id, [
-    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id },
-    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id },
+    { role: "AREA_OWNER", decision: "APPROVED", approverId: areaOwner.id, comment: "Area checked, isolation confirmed" },
+    { role: "SAFETY_OFFICER", decision: "APPROVED", approverId: safetyOfficer.id, comment: "Precautions verified on site" },
   ]);
+  await fullyApproved(p9.id, 60);
+  await audit(p9.id, requester.id, "ACTIVATE", "APPROVED", "ACTIVE", 30);
+  await audit(p9.id, requester.id, "CLOSE", "ACTIVE", "CLOSED", 24, "Work completed, area inspected by requester");
 
-  // 10. REJECTED
+  // 10. REJECTED — with the reason saved
   const p10 = await prisma.permit.create({
     data: {
       number: "PTW-0010", type: "CONFINED_SPACE", status: "REJECTED",
@@ -222,15 +284,18 @@ async function main() {
     },
   });
   await withApprovals(p10.id, [
-    { role: "AREA_OWNER", decision: "REJECTED", approverId: areaOwner.id, comment: "No rescue plan provided" } as any,
+    { role: "AREA_OWNER", decision: "REJECTED", approverId: areaOwner.id, comment: "No rescue plan provided" },
     { role: "SAFETY_OFFICER", decision: "PENDING" },
   ]);
+  await submitted(p10.id, 30);
+  await audit(p10.id, areaOwner.id, "REJECT", "PENDING_APPROVAL", "REJECTED", 28, "No rescue plan provided");
 
   console.log("\nSeed complete. Login with any of these (password: " + PASSWORD + "):");
   console.log("REQUESTER:       requester@ptw.test");
   console.log("AREA_OWNER:      areaowner@ptw.test  (owns: Boiler House)");
   console.log("SAFETY_OFFICER:  safety@ptw.test");
   console.log("ADMIN:           admin@ptw.test");
+  console.log("\nDates are relative to now. Re-run the seed if permits look expired.");
 }
 
 main()
