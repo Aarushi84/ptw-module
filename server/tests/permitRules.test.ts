@@ -93,3 +93,20 @@ describe("approval rules", () => {
     expect(codeOf(() => checkTransition("verify", p, safety, now))).toBe(403);
   });
 });
+describe("expiry rules", () => {
+  const late = new Date("2026-09-25T18:00:00Z");
+  const system = user("u-system", "ADMIN");
+
+  it("expires an active permit after its end time", () => {
+    expect(checkTransition("expire", permit({ status: "ACTIVE" }), system, late)).toBe("EXPIRED");
+  });
+  it("does not expire a permit still inside its window", () => {
+    expect(codeOf(() => checkTransition("expire", permit({ status: "ACTIVE" }), system, now))).toBe(409);
+  });
+  it("does not expire a draft", () => {
+    expect(codeOf(() => checkTransition("expire", permit({ status: "DRAFT" }), system, late))).toBe(409);
+  });
+  it("never reactivates an expired permit", () => {
+    expect(codeOf(() => checkTransition("activate", permit({ status: "EXPIRED" }), requester, now))).toBe(409);
+  });
+});
