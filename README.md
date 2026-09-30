@@ -1,170 +1,96 @@
 # Permit to Work (PTW) Module
 
-A Permit to Work module for a CMMS (Computerized Maintenance Management System). It manages hazardous-work permits from request to closure. Every rule is enforced on the server, so the UI cannot be used to skip a safety step.
+A Permit to Work module for a CMMS. It manages hazardous-work permits from request to closure: hot work, confined space entry, work at height, and electrical isolation (LOTO). Every rule is enforced on the server, so the UI cannot be used to skip a safety step.
 
-**Live demo:** https://ptw-module.vercel.app
-**API health check:** https://ptw-module.onrender.com/health
+- **Live demo:** https://ptw-module.vercel.app
+- **API health check:** https://ptw-module.onrender.com/health
+
+Note: the API runs on Render's free plan and sleeps when idle. The first request can take 30-50 seconds. Please wait and refresh once.
+
+---
+
+## Demo logins
+
+Password for all accounts: `password123`
+
+| Role | Email | Notes |
+|---|---|---|
+| Requester | requester@ptw.test | Creates, submits, activates and closes permits |
+| Area Owner | areaowner@ptw.test | Owns **Boiler House** only |
+| Safety Officer | safety@ptw.test | Approves any permit, suspends, verifies closure |
+| Admin | admin@ptw.test | Full access |
+
+Seeded data: 2 plants, 3 areas, 6 equipment items, 10 permits in different statuses.
+
+**Seed dates are relative to when the seed runs.** If permits look expired, run `npm run seed` again (see below). Running it deletes all existing data.
+
+### Good permits to try
+
+- **PTW-0003** (Workshop, pending): the Area Owner cannot approve it, because it is outside Boiler House. No Approve button is shown, and the API returns 403 if called directly.
+- **PTW-0004** (Boiler House, pending): the Area Owner approves, then the Safety Officer approves.
+- **PTW-0005** (approved, start time passed): the Requester can activate it.
+- **PTW-0006** (approved, starts in 2 hours): activation is refused until the start time.
+- **PTW-0007** (active, ends in 1.5 hours): appears under "Expiring within 2 hours".
+- **PTW-0008** (active): the Safety Officer can suspend it.
+- **PTW-0009** (closed): the Safety Officer can verify it.
+- **Conflict warning:** as Requester, create a Hot Work permit in Tank Farm on TNK-201 that overlaps PTW-0006 (Confined Space, same area).
 
 ---
 
 ## What problem it solves
 
-On an industrial site, jobs like welding, confined-space entry, work at height and electrical isolation need written permission before anyone starts. On paper or in spreadsheets, it is hard to prove who approved what, and when. Permits get approved after the work slot has passed, one person signs for two roles, and two dangerous jobs run in the same area at the same time.
-
-This module makes those mistakes hard to make:
-
-- A permit cannot start until two different people (Area Owner and Safety Officer) approve it.
-- Nobody can approve a permit after its work window has ended.
-- Every change is written to an audit trail, so there is a full record of who did what, and when.
-
----
-
-## Features
-
-### Permits
-- Four permit types: hot work, confined space, work at height, electrical isolation.
-- Each type has its own extra fields. For example, hot work asks for the type of hot work, fire watch name, extinguisher type, cleared radius, and gas test readings (LEL % and O2 %).
-- Two-step create form: common details first, then type-specific details.
-- Save as draft, or submit for approval.
-- Auto-numbered permits (`PTW-0001`, `PTW-0002`, ...).
-- Drafts can be edited only by their own requester. Once submitted, a permit is locked.
-- Permit list can be filtered by status, type, area, date range, and "waiting for my approval".
-
-### Approval workflow
-- Every submitted permit needs two approvals: **Area Owner** and **Safety Officer**.
-- One person cannot fill both approval slots.
-- Rejecting a permit requires a written reason.
-- Approvals are blocked once the permit's planned end time has passed.
-- The permit becomes **Approved** only when both approvers have approved. A single rejection sets it to **Rejected**.
-
-### Lifecycle
-Draft → Pending approval → Approved → Active → Closed → Verified
-
-Other states: Suspended (and resume back to Active), Rejected, Cancelled, Expired.
-
-| Status | Meaning |
-|---|---|
-| Draft | Being written by the requester. Not visible to approvers. |
-| Pending approval | Submitted. Waiting for both approvers. |
-| Approved | Both approvers signed. Work has not started yet. |
-| Active | Work is in progress. |
-| Suspended | Work paused. Can be resumed. |
-| Closed | Work finished. Completion notes recorded. |
-| Verified | Closure checked and confirmed. |
-| Rejected | An approver rejected it. Reason is on record. |
-| Cancelled / Expired | Permit ended without completing normally. |
-
-### Safety checks
-- **Conflict warning:** when a hot work permit overlaps in time and area with a confined space permit (or the other way round), the requester sees a warning with the permit number it clashes with. The two jobs should not run together, because open flame and confined-space ventilation do not mix.
-- **Type-specific validation:** a permit cannot be submitted until its type-specific fields pass validation.
-
-### Access control
-- Role-based access: Requester, Area Owner, Safety Officer, Admin.
-- The server checks the user's role on every action.
-- The UI only shows buttons the current user is allowed to use. Even if a button were shown by mistake, the server would still refuse the action.
-
-### Audit trail
-- Every create, edit, approval, rejection and status change is logged with the person, the time, the old status, the new status and any comment.
-- Edits to draft permits are logged field by field, with old and new values.
-- The audit trail is shown on each permit's detail page.
-
-### Safe under simultaneous use
-- Each permit has a version number. If two people change the same permit at the same moment, the second one gets a clear "changed by someone else, refresh and try again" message instead of silently overwriting.
-- Status changes and their audit log entries are saved together in one database transaction. Either both are saved or neither is.
+On an industrial site, jobs like welding, confined-space entry, work at height and electrical isolation need written permission before anyone starts. On paper or in spreadsheets it is hard to prove who approved what, and when. This module keeps one record per permit, forces the right approvals, blocks work outside the approved time window, and keeps a full audit trail.
 
 ---
 
 ## Tech stack
 
-| Layer | Technology |
-|---|---|
-| Frontend | React, TypeScript, Vite |
-| Backend | Node.js, Express, TypeScript |
-| Database | PostgreSQL (Neon) with Prisma |
-| Auth | JWT bearer tokens |
-| Hosting | Vercel (client), Render (server) |
+- **Frontend:** React + TypeScript (Vite), deployed on Vercel
+- **Backend:** Node + Express + TypeScript, deployed on Render
+- **Database:** PostgreSQL (Neon) with Prisma
+- **Auth:** email + password, JWT (8 hour expiry)
+- **Tests:** Vitest
 
 ---
 
-## Project structure
+## Run it locally
+
+You need Node 20+ and a PostgreSQL database (a free Neon database works).
+
+**1. Server**
 
 ```
-ptw-module/
-├── client/
-│   └── src/
-│       ├── api.ts                  # fetch wrapper, reads VITE_API_URL
-│       ├── types.ts
-│       ├── components/
-│       │   └── ProtectedRoute.tsx
-│       ├── context/
-│       │   └── AuthContext.tsx
-│       ├── lib/
-│       │   └── permitActions.ts    # which buttons a user may see
-│       └── pages/
-│           ├── Login.tsx
-│           ├── Dashboard.tsx
-│           ├── CreatePermit.tsx
-│           └── PermitDetail.tsx
-└── server/
-    └── src/
-        ├── db.ts
-        ├── middleware/
-        │   ├── auth.ts             # verifies the JWT
-        │   └── requireRole.ts      # role check per route
-        ├── routes/
-        │   └── permits.ts          # HTTP layer only
-        ├── services/
-        │   ├── permitService.ts    # transactions, approvals, audit log
-        │   └── permitRules.ts      # all state-machine and permission rules
-        └── validation/
-            └── permitTypes.ts      # per-type field validation
-```
-
-Design choice: **all business rules live in one file** (`permitRules.ts`). Routes only handle HTTP, and the service layer only handles database work. This keeps the rules easy to read and easy to test.
-
----
-
-## Run locally
-
-You need Node.js 18+ and a PostgreSQL database (a free Neon database works).
-
-**1. Clone**
-
-```bash
-git clone https://github.com/Aarushi84/ptw-module.git
-cd ptw-module
-```
-
-**2. Server**
-
-```bash
 cd server
 npm install
+copy .env.example .env
 ```
 
-Copy `.env.example` to `.env` and set:
+Open `server/.env` and fill in:
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET` | Secret used to sign login tokens |
+```
+DATABASE_URL=your postgres connection string
+JWT_SECRET=any long random string
+CRON_SECRET=any long random string
+```
 
-Then run:
+Then:
 
-```bash
+```
+npm run migrate
+npm run seed
 npm run dev
 ```
 
-The API starts on `http://localhost:3000`. Open `/health` to check it.
+The server runs on http://localhost:3000. Check http://localhost:3000/health.
 
-**3. Client** (second terminal)
+**2. Client** (new terminal)
 
-```bash
+```
 cd client
 npm install
 ```
 
-Create `client/.env`:
+Create `client/.env` with:
 
 ```
 VITE_API_URL=http://localhost:3000
@@ -172,96 +98,143 @@ VITE_API_URL=http://localhost:3000
 
 Then:
 
-```bash
+```
 npm run dev
 ```
 
-**4. Areas and equipment**
+Open the URL Vite prints and log in with a demo account.
 
-Permits need an Area ID and an Equipment ID. In the create form these are pasted in by hand. To find real IDs, open Prisma Studio from the `server` folder:
+**3. Tests**
 
-```bash
-npx prisma studio
 ```
-
-Copy an `id` from the `Area` table and one from the `Equipment` table.
-
----
-
-## Demo accounts
-
-| Name | Role | Email |
-|---|---|---|
-| Ravi Kumar | Requester | `requester@ptw.test` |
-| Suresh Iyer | Safety Officer | `safety@ptw.test` |
-| Priya Nair | Area Owner | `area@ptw.test` |
-
-All demo accounts use the password `password123`. These are test accounts with sample data only.
-
-To see the full approval flow, log in as the Requester and create and submit a permit. Then log in as the Safety Officer and approve it. Then log in as the Area Owner and approve it. The permit only becomes Approved after both.
-
-**Tip:** set the planned end time well in the future. Approvals are blocked after it passes.
-
----
-
-## API overview
-
-All routes except login and health need an `Authorization: Bearer <token>` header.
-
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/health` | Server check |
-| POST | `/auth/login` | Log in, get a token |
-| POST | `/permits` | Create a draft permit |
-| GET | `/permits` | List permits, with filters |
-| GET | `/permits/:id` | Permit detail with approvals and audit trail |
-| PATCH | `/permits/:id` | Edit a draft |
-| POST | `/permits/:id/submit` | Validate and submit for approval |
-| POST | `/permits/:id/activate` | Start work |
-| POST | `/permits/:id/suspend` | Pause work |
-| POST | `/permits/:id/resume` | Resume work |
-| POST | `/permits/:id/close` | Close with completion notes |
-| POST | `/permits/:id/verify` | Verify the closure |
-| POST | `/permits/:id/cancel` | Cancel a permit |
-| POST | `/permits/:id/approvals/:approvalId/decide` | Approve or reject one approval |
-
-Errors are returned as JSON with a `message`. Validation errors also include an `issues` list. Status codes: `400` invalid input, `403` not allowed, `404` not found, `409` rule violation or stale version.
-
----
-
-## Tests and build
-
-```bash
 cd server
-npm test          # state machine and validation tests
-npm run build
-
-cd ../client
-npm run build
+npm test
 ```
 
 ---
 
-## Deployment
+## How it is built
 
-- **Client:** Vercel. Set the environment variable `VITE_API_URL` to the server URL (no trailing slash) and redeploy. Vite reads this at build time, so changing it needs a new build.
-- **Server:** Render, with `DATABASE_URL` and `JWT_SECRET` set.
-- **Database:** Neon PostgreSQL.
+### One permit model, type-specific data
 
-If the server has been idle, the first request can take a while to respond.
+All four permit types share one `Permit` table. Common fields (requester, contractor, work description, area, equipment, time window, hazards, PPE, precautions, status) are real columns. Type-specific fields (gas readings, lock numbers, height, etc.) live in one `typeData` JSON column, validated per type in `server/src/validation/permitTypes.ts`.
+
+To add a fifth type such as Excavation: add one enum value, one validation schema, and one field group in the create form. The lifecycle, approvals, audit trail and dashboard do not change.
+
+Trade-off: JSON fields cannot be queried or constrained by the database as easily as columns. I chose this because the four types have different fields and a new type should not need a migration.
+
+### State machine
+
+All rules are in `server/src/services/permitRules.ts` as plain functions with no database access, so they are easy to unit test. `permitService.ts` calls them inside a database transaction for every status change. Every illegal move returns a clear error: 409 for a wrong state, 403 for a wrong role or person.
+
+Rules enforced on the server:
+
+- A permit cannot go ACTIVE unless every required approver has approved.
+- A permit cannot go ACTIVE before its planned start, or after its planned end.
+- Expired permits can never be reactivated or resumed.
+- Rejecting needs a reason. Closing needs completion notes.
+- A person can never approve their own permit, including Admin and Safety Officer.
+- An Area Owner can only approve permits in their own area.
+- Only a Safety Officer (or Admin) can suspend, resume or verify.
+- The person who raised a permit cannot verify its closure.
+
+Concurrent changes are handled with a `version` column. If two people act at the same moment, the second gets a 409 and must refresh.
+
+### Roles
+
+Enforced in middleware (`requireRole`) and in the rules file, never only in the UI. The UI also hides buttons the user cannot use.
+
+### Audit trail
+
+Every state change, approval, rejection, suspension and draft edit writes an `AuditLog` row: who, what, when, from-status, to-status, field, old value, new value, comment. The permit page shows it as a timeline.
+
+### Expiry
+
+Expiry works in two ways:
+
+1. **On read:** every time permits are listed or opened, overdue permits are moved to EXPIRED and an audit entry is written by a "System" user.
+2. **Timer:** an outside timer (cron-job.org) calls `POST /internal/expire` every 5 minutes with the `x-cron-secret` header, so permits expire even when nobody has the app open.
+
+### Conflict detection
+
+When a Hot Work or Confined Space permit is created, the server checks for a permit of the other type in the same area with an overlapping time window (pending, approved or active). It returns a warning and still saves the permit. It warns rather than blocks because the decision belongs to the approvers.
+
+### Notifications
+
+Not built (out of scope). No email or SMS is sent.
 
 ---
 
-## Known limitations
+## Decisions where the spec was silent
 
-- Area and equipment are entered by ID. A dropdown fed from the database would be better.
-- The approval deadline is tied to the work window (`plannedEnd`). A permit for a short job can become impossible to approve if reviewers are slow. A separate approval deadline would fix this.
-- Permit numbers are based on a count of existing permits. Two permits created at the same instant could get the same number. A database sequence would be safer.
-- The permit `type` value is not checked against the allowed list before the conflict check. Invalid values fail later, at the database, instead of returning a clean `400`.
-- The conflict check between hot work and confined space warns the requester but does not block creation.
+- **Approvers:** every permit type needs two approvals: the Area Owner of that area and a Safety Officer. This is one constant in `permitService.ts`, so it can change per type later.
+- **Admin approving:** an Admin can approve on behalf of a required role, but never their own permit, and cannot fill both approval rows.
+- **Editing:** a permit can only be edited while it is a DRAFT. After submission nothing can be changed, so the approvals always refer to the same content.
+- **Who activates:** the Requester (own permit), Safety Officer or Admin.
+- **Cancel:** allowed from any non-terminal state by the Requester (own permit), Safety Officer or Admin.
+- **What expires:** permits waiting for approval, approved, active or suspended. Drafts do not expire.
+- **Suspended permits:** they keep their end time. If it passes while suspended, the permit expires.
+- **Permit numbers:** `PTW-0001`, `PTW-0002`, and so on.
+- **Equipment check:** the server rejects a permit if the equipment does not belong to the chosen area.
+- **System user:** automatic expiry is logged under `system@ptw.local`. Nobody can log in as it.
 
 ---
 
-## Author
+## What I knowingly left broken or unbuilt
 
-Aarushi — [github.com/Aarushi84](https://github.com/Aarushi84)
+**Missing from the spec**
+
+- **No work log.** There is no endpoint to log work against a permit, so the rule "work cannot be logged unless ACTIVE" is not applicable yet. The confined-space entry/exit log is also not built.
+- **No admin screens.** Admin has full API access, but there are no screens to manage users, areas or equipment. Use the seed or the database.
+- **No extension requests.**
+- **No QR code, no digital signature, no countdown timer** on active permits.
+- **Not designed mobile-first.** The layout works on a phone but is not tuned for gloves or sunlight.
+
+**Known bugs and weak points**
+
+- **"My approvals pending"** returns nothing for the Admin role, because approval rows are created for Area Owner and Safety Officer only.
+- **Permit numbers** come from a row count. Two permits created at the same instant could collide (the unique constraint would then return a 500), and deleting rows would reuse numbers. A database sequence would fix this.
+- **Type-specific fields** are fully validated on submit, not when saving a draft. Drafts can hold incomplete data.
+- **Create form** takes some fields as free text (for example "welding / grinding") instead of dropdowns, and true/false fields are typed as text.
+- **Tests** cover the state machine, permission rules and permit-type validation. There are no tests that call the API end to end.
+- **Security basics:** the token is kept in `localStorage`, CORS is open to all origins, and there is no rate limiting on login.
+- **Free hosting:** the API sleeps when idle.
+
+---
+
+## What I would build next
+
+1. Work log endpoint (blocked unless ACTIVE) and the confined-space entry/exit log.
+2. Extension requests with a cap, re-approval by the Safety Officer, and an audit entry.
+3. Admin screens for users, areas and equipment.
+4. API-level tests for the illegal-transition and wrong-role cases.
+5. Countdown on active permits and a mobile-first permit view with large buttons.
+6. Permit numbers from a database sequence.
+
+---
+
+## Use of AI
+
+I used Claude as a coding assistant. It helped with:
+
+- The automatic expiry function and the cron-protected `/internal/expire` route
+- The area and equipment lookup routes and the dependent dropdowns in the create form
+
+
+My own part: I chose what to build and what to leave out, reviewed the code, set up the databases and the Render, Vercel and cron-job.org deployments, seeded the live database, and tested the app as each role. [Add here what you designed or wrote yourself, for example the data model, permit type validation or state rules. Only write what is true.]
+
+---
+
+## Project structure
+
+```
+client/                 React app
+  src/pages/            Dashboard, CreatePermit, PermitDetail, Login
+  src/lib/              Which actions each role sees
+server/
+  prisma/               schema.prisma, migrations, seed.ts
+  src/routes/           auth, permits, lookup
+  src/services/         permitRules.ts (pure rules), permitService.ts (transactions)
+  src/validation/       Per-type validation
+  tests/                Vitest tests
+```
