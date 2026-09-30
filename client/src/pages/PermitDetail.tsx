@@ -32,40 +32,41 @@ export default function PermitDetail() {
   const [commentModal, setCommentModal] = useState<{ actionKey: string; label: string } | null>(null);
   const [comment, setComment] = useState("");
   const [rejectModal, setRejectModal] = useState<string | null>(null); // approvalId
-async function refresh() {
-  if (!id) return;
-  try {
-    const data = await api.get<Permit>(`/permits/${id}`);
-    setPermit(data);
-  } catch (err) {
-    setError(err instanceof ApiRequestError ? err.message : "Could not load permit");
-  }
-}
 
-useEffect(() => {
-  let cancelled = false;
-
-  async function load() {
+  async function refresh() {
     if (!id) return;
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.get<Permit>(`/permits/${id}`);
-      if (!cancelled) setPermit(data);
+      setPermit(data);
     } catch (err) {
-      if (!cancelled) {
-        setError(err instanceof ApiRequestError ? err.message : "Could not load permit");
-      }
-    } finally {
-      if (!cancelled) setLoading(false);
+      setError(err instanceof ApiRequestError ? err.message : "Could not load permit");
     }
   }
 
-  load();
-  return () => {
-    cancelled = true;
-  };
-}, [id]);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      if (!id) return;
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.get<Permit>(`/permits/${id}`);
+        if (!cancelled) setPermit(data);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof ApiRequestError ? err.message : "Could not load permit");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   async function runAction(actionKey: string, body?: { comment?: string }) {
     if (!id) return;
@@ -73,7 +74,7 @@ useEffect(() => {
     setError(null);
     try {
       await api.post(`/permits/${id}/${actionKey}`, body ?? {});
-     await refresh();
+      await refresh();
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : "Action failed");
     } finally {
@@ -89,7 +90,7 @@ useEffect(() => {
     setError(null);
     try {
       await api.post(`/permits/${id}/approvals/${approvalId}/decide`, { decision, comment: reason });
-     await refresh();
+      await refresh();
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : "Could not record decision");
     } finally {
@@ -104,9 +105,21 @@ useEffect(() => {
   if (!permit || !user) return null;
 
   const actions = getAvailableActions(permit, user);
-  const myPendingApproval = permit.approvals?.find(
-    (a) => a.decision === "PENDING" && (a.requiredRole === user.role || user.role === "ADMIN")
-  );
+
+  // Mirrors the server rules, so nobody sees a button that will be refused
+  const canDecide =
+    permit.status === "PENDING_APPROVAL" &&
+    permit.requesterId !== user.id &&
+    !permit.approvals?.some((a) => a.approverId === user.id) &&
+    (user.role === "ADMIN" ||
+      user.role === "SAFETY_OFFICER" ||
+      (user.role === "AREA_OWNER" && user.areaId === permit.areaId));
+
+  const myPendingApproval = canDecide
+    ? permit.approvals?.find(
+        (a) => a.decision === "PENDING" && (a.requiredRole === user.role || user.role === "ADMIN")
+      )
+    : undefined;
 
   return (
     <div>
@@ -137,7 +150,7 @@ useEffect(() => {
 
         {error && <div className="card" style={{ borderColor: "var(--danger)", marginBottom: 16 }}><p className="error-text">{error}</p></div>}
 
-        {/* Approval prompt if this user has one pending */}
+        {/* Approval prompt, only when this user can really approve */}
         {myPendingApproval && (
           <div className="card" style={{ borderColor: "var(--accent)", background: "var(--accent-dim)", marginBottom: 16 }}>
             <p style={{ fontWeight: 600, marginBottom: 10 }}>Your approval is needed</p>
@@ -152,7 +165,7 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Reject reason modal (inline card, not a real modal, to keep this simple) */}
+        {/* Reject reason box */}
         {rejectModal && (
           <div className="card" style={{ borderColor: "var(--danger)", marginBottom: 16 }}>
             <label style={{ display: "block", fontSize: 12.5, color: "var(--text-muted)", marginBottom: 6 }}>
@@ -203,6 +216,14 @@ useEffect(() => {
           </div>
         </div>
 
+        {/* Completion notes */}
+        {permit.completionNotes && (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Completion notes</h3>
+            <p style={{ fontSize: 13.5 }}>{permit.completionNotes}</p>
+          </div>
+        )}
+
         {/* Approvals */}
         <div className="card" style={{ marginBottom: 12 }}>
           <h3 style={{ fontSize: 14, marginBottom: 14 }}>Approvals</h3>
@@ -242,7 +263,7 @@ useEffect(() => {
         {commentModal && (
           <div className="card" style={{ marginBottom: 12 }}>
             <label style={{ display: "block", fontSize: 12.5, color: "var(--text-muted)", marginBottom: 6 }}>
-              Completion notes
+              {commentModal.actionKey === "close" ? "Completion notes (required)" : "Reason / comment"}
             </label>
             <textarea
               value={comment}
@@ -251,7 +272,11 @@ useEffect(() => {
               style={{ width: "100%", padding: 9, border: "1px solid var(--border)", borderRadius: "var(--radius)", marginBottom: 10 }}
             />
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn btn-primary" disabled={busy} onClick={() => runAction(commentModal.actionKey, { comment })}>
+              <button
+                className="btn btn-primary"
+                disabled={busy || (commentModal.actionKey === "close" && !comment.trim())}
+                onClick={() => runAction(commentModal.actionKey, { comment })}
+              >
                 Confirm
               </button>
               <button className="btn" onClick={() => { setCommentModal(null); setComment(""); }}>Cancel</button>
