@@ -1,4 +1,4 @@
-import type { Role } from "@prisma/client";
+import type { Role, PermitStatus } from "@prisma/client";
 import { prisma } from "../db";
 import {
   Action,
@@ -132,4 +132,72 @@ export async function decideApproval(
       include: { approvals: true },
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Automatic expiry
+// ---------------------------------------------------------------------------
+
+const SYSTEM_EMAIL = "system@ptw.local";
+
+// Statuses that stop being valid once plannedEnd has passed
+const EXPIRABLE: PermitStatus[] = ["PENDING_APPROVAL", "APPROVED", "ACTIVE", "SUSPENDED"];
+
+// The audit log needs a user for every entry. Expiry has no human, so we use
+// a "System" user. Its password hash is "!", so nobody can log in as it.
+async function getSystemUserId() {
+  const u = await prisma.user.upsert({
+    where: { email: SYSTEM_EMAIL },
+    update: {},
+    create: { name: "System", email: SYSTEM_EMAIL, passwordHash: "!", role: "ADMIN" },
+  });
+  return u.id;
+}
+
+/** Moves every overdue permit to EXPIRED and writes an audit entry. Returns how many. */
+export async function expireOverduePermits(now = new Date()) {
+  const overdue = await prisma.permit.findMany({
+    where: { status: { in: EXPIRABLE }, plannedEnd: { lte: now } },
+    select: { id: true },
+  });
+  if (overdue.length === 0) return 0;
+
+  const systemId = await getSystemUserId();
+  const systemUser: UserLike = { id: systemId, role: "ADMIN", areaId: null };
+  let count = 0;
+
+  for (const { id } of overdue) {
+    await prisma.$transaction(async (tx) => {
+      const p = await tx.permit.findUnique({ where: { id }, include: { approvals: true } });
+      if (!p) return;
+
+      // The rule "only expire after plannedEnd" stays in permitRules.ts
+      let newStatus: PermitStatus;
+      try {
+        newStatus = checkTransition("expire", p, systemUser, now);
+      } catch (e) {
+        if (e instanceof RuleError) return; // not expirable right now, skip it
+        throw e;
+      }
+
+      const r = await tx.permit.updateMany({
+        where: { id, version: p.version },
+        data: { status: newStatus, version: { increment: 1 } },
+      });
+      if (r.count === 0) return; // someone changed it at the same moment
+
+      await tx.auditLog.create({
+        data: {
+          permitId: id,
+          actorId: systemId,
+          action: "EXPIRE",
+          fromStatus: p.status,
+          toStatus: newStatus,
+          comment: "Validity window passed. Expired automatically.",
+        },
+      });
+      count++;
+    });
+  }
+  return count;
 }
