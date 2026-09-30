@@ -1,18 +1,19 @@
 import { Router } from "express";
-import { Prisma, type PermitType } from "@prisma/client";
+import { Prisma, PermitType } from "@prisma/client";
 import { prisma } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/requireRole";
 import { validateTypeData, ValidationError } from "../validation/permitTypes";
-import { transitionPermit, decideApproval } from "../services/permitService";
+import { transitionPermit, decideApproval, expireOverduePermits } from "../services/permitService";
 import { RuleError } from "../services/permitRules";
 
 export const permitRouter = Router();
 permitRouter.use(requireAuth);
 
-// Permit types that are dangerous to run at the same time, in the same area —
-// e.g. hot work (open flame) and confined space entry (may need ventilation,
-// escape routes clear) should not overlap. Almost no PTW software checks this.
+// Permit types that are dangerous to run at the same time, in the same area.
+// Hot work (open flame) next to a confined space entry (possible vapour,
+// people inside) is a known cause of accidents. To add another dangerous
+// pair, add it here.
 const CONFLICTING_TYPES: Partial<Record<PermitType, PermitType[]>> = {
   HOT_WORK: ["CONFINED_SPACE"],
   CONFINED_SPACE: ["HOT_WORK"],
@@ -55,6 +56,13 @@ permitRouter.post("/", requireRole(["REQUESTER", "ADMIN"]), async (req, res) => 
     }
     if (new Date(b.plannedEnd) <= new Date(b.plannedStart)) {
       return res.status(400).json({ message: "plannedEnd must be after plannedStart" });
+    }
+    if (!Object.values(PermitType).includes(b.type)) {
+      return res.status(400).json({ message: "Invalid permit type" });
+    }
+    const equipment = await prisma.equipment.findUnique({ where: { id: b.equipmentId } });
+    if (!equipment || equipment.areaId !== b.areaId) {
+      return res.status(400).json({ message: "Equipment does not belong to the selected area" });
     }
     if (b.hazards !== undefined && !isStringArray(b.hazards)) {
       return res.status(400).json({ message: "hazards must be an array of strings" });
@@ -112,6 +120,9 @@ permitRouter.post("/", requireRole(["REQUESTER", "ADMIN"]), async (req, res) => 
 // LIST — filterable
 permitRouter.get("/", async (req, res) => {
   try {
+    // Expire overdue permits first, so the list never shows a stale ACTIVE one
+    await expireOverduePermits().catch((e) => console.error("expire failed", e));
+
     const { status, type, areaId, from, to, mine } = req.query as Record<string, string>;
     const where: any = {};
     if (status) where.status = status;
@@ -147,6 +158,8 @@ permitRouter.get("/", async (req, res) => {
 // DETAIL
 permitRouter.get("/:id", async (req, res) => {
   try {
+    await expireOverduePermits().catch((e) => console.error("expire failed", e));
+
     const permit = await prisma.permit.findUnique({
       where: { id: paramId(req, "id") },
       include: {
