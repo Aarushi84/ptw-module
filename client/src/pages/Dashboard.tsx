@@ -38,6 +38,12 @@ const TYPE_LABEL: Record<PermitType, string> = {
   ELECTRICAL_LOTO: "Electrical / LOTO",
 };
 
+interface AreaOption {
+  id: string;
+  name: string;
+  plant: { name: string };
+}
+
 function StatusBadge({ status }: { status: PermitStatus }) {
   return (
     <span className={`badge ${STATUS_BADGE[status]}`}>
@@ -65,14 +71,45 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   const [permits, setPermits] = useState<Permit[]>([]);
+  const [activePermits, setActivePermits] = useState<Permit[]>([]);
+  const [areas, setAreas] = useState<AreaOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [areaFilter, setAreaFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [myApprovalsOnly, setMyApprovalsOnly] = useState(false);
   const [search, setSearch] = useState("");
 
+  // Area list for the filter
+  useEffect(() => {
+    api.get<AreaOption[]>("/lookup/areas").then(setAreas).catch(() => {});
+  }, []);
+
+  // The two top cards always use ALL active permits, whatever the filters say.
+  // Refreshed every minute, so an expired permit drops off by itself.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadActive() {
+      try {
+        const data = await api.get<Permit[]>("/permits?status=ACTIVE");
+        if (!cancelled) setActivePermits(data);
+      } catch {
+        // keep the last values
+      }
+    }
+    loadActive();
+    const timer = setInterval(loadActive, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  // The table uses the filters
   useEffect(() => {
     let cancelled = false;
 
@@ -83,6 +120,9 @@ export default function Dashboard() {
         const params = new URLSearchParams();
         if (statusFilter) params.set("status", statusFilter);
         if (typeFilter) params.set("type", typeFilter);
+        if (areaFilter) params.set("areaId", areaFilter);
+        if (fromDate) params.set("from", new Date(`${fromDate}T00:00:00`).toISOString());
+        if (toDate) params.set("to", new Date(`${toDate}T23:59:59`).toISOString());
         if (myApprovalsOnly) params.set("mine", "pendingApproval");
         const data = await api.get<Permit[]>(`/permits?${params.toString()}`);
         if (!cancelled) setPermits(data);
@@ -99,15 +139,12 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [statusFilter, typeFilter, myApprovalsOnly]);
+  }, [statusFilter, typeFilter, areaFilter, fromDate, toDate, myApprovalsOnly]);
 
-  const activeNow = useMemo(() => permits.filter((p) => p.status === "ACTIVE"), [permits]);
+  const activeNow = activePermits;
   const expiringSoon = useMemo(
-    () =>
-      permits.filter(
-        (p) => p.status === "ACTIVE" && hoursUntil(p.plannedEnd) <= 2 && hoursUntil(p.plannedEnd) >= 0
-      ),
-    [permits]
+    () => activePermits.filter((p) => hoursUntil(p.plannedEnd) <= 2 && hoursUntil(p.plannedEnd) >= 0),
+    [activePermits]
   );
 
   const visiblePermits = useMemo(() => {
@@ -121,25 +158,37 @@ export default function Dashboard() {
     );
   }, [permits, search]);
 
+  const anyFilter = statusFilter || typeFilter || areaFilter || fromDate || toDate || myApprovalsOnly || search;
+
+  function clearFilters() {
+    setStatusFilter("");
+    setTypeFilter("");
+    setAreaFilter("");
+    setFromDate("");
+    setToDate("");
+    setMyApprovalsOnly(false);
+    setSearch("");
+  }
+
   return (
     <div>
-    <div className="topbar topbar-dark">
+      <div className="topbar topbar-dark">
         <div className="topbar-brand">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-           <path
-  d="M12 2 3 6v6c0 5 3.8 8.7 9 10 5.2-1.3 9-5 9-10V6l-9-4Z"
-  fill="rgba(255,255,255,0.12)"
-  stroke="#fff"
-  strokeWidth="1.6"
-  strokeLinejoin="round"
-/>
-<path
-  d="M8.5 12.2 11 14.7l4.5-5"
-  stroke="#fff"
-  strokeWidth="1.8"
-  strokeLinecap="round"
-  strokeLinejoin="round"
-/>
+            <path
+              d="M12 2 3 6v6c0 5 3.8 8.7 9 10 5.2-1.3 9-5 9-10V6l-9-4Z"
+              fill="rgba(255,255,255,0.12)"
+              stroke="#fff"
+              strokeWidth="1.6"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M8.5 12.2 11 14.7l4.5-5"
+              stroke="#fff"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
           Permit to Work
         </div>
@@ -160,7 +209,7 @@ export default function Dashboard() {
             <div>
               <h2 style={{ fontSize: 21, marginBottom: 4 }}>Permits</h2>
               <p className="muted" style={{ fontSize: 13.5 }}>
-                {permits.length} permit{permits.length !== 1 ? "s" : ""} in view
+                {visiblePermits.length} permit{visiblePermits.length !== 1 ? "s" : ""} in view
               </p>
             </div>
           </div>
@@ -274,6 +323,22 @@ export default function Dashboard() {
               </option>
             ))}
           </select>
+          <select value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)} style={selectStyle}>
+            <option value="">All areas</option>
+            {areas.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.plant.name} → {a.name}
+              </option>
+            ))}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
+            From
+            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={selectStyle} />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
+            To
+            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={selectStyle} />
+          </label>
           {(user?.role === "AREA_OWNER" || user?.role === "SAFETY_OFFICER" || user?.role === "ADMIN") && (
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-muted)" }}>
               <input
@@ -283,6 +348,11 @@ export default function Dashboard() {
               />
               My approvals pending
             </label>
+          )}
+          {anyFilter && (
+            <button className="btn btn-sm" onClick={clearFilters}>
+              Clear filters
+            </button>
           )}
         </div>
 
