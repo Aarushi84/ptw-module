@@ -21,6 +21,11 @@ export async function transitionPermit(
   user: UserLike,
   comment?: string
 ) {
+  // Closing a permit needs completion notes
+  if (action === "close" && !comment?.trim()) {
+    throw new RuleError(400, "Completion notes are required to close a permit");
+  }
+
   return prisma.$transaction(async (tx) => {
     const permit = await tx.permit.findUnique({
       where: { id: permitId },
@@ -34,7 +39,11 @@ export async function transitionPermit(
     // Only update if nobody changed the permit since we read it
     const result = await tx.permit.updateMany({
       where: { id: permitId, version: permit.version },
-      data: { status: newStatus, version: { increment: 1 } },
+      data: {
+        status: newStatus,
+        version: { increment: 1 },
+        ...(action === "close" ? { completionNotes: comment!.trim() } : {}),
+      },
     });
     if (result.count === 0) throw new RuleError(409, STALE_MESSAGE);
 
